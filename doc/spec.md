@@ -83,23 +83,26 @@ All stage actions are performed inside a single sequential always block using `c
 ### Stage 2 — Special classification + denormal setup
 - Checks operand classes using `a_is_nan`, `a_is_inf`, `a_is_zero`, etc. (derived from `a_r/b_r` fields).
 - For normal operation:
-  - If exponent is nonzero => sets implicit leading 1: `a_m[23] = 1`.
-  - If exponent is zero (subnormal) => forces exponent to -126 (subnormal exponent baseline).
+  - **CRITICAL:** Use 24-bit registers for a_m and b_m.
+- You must explicitly prepend the hidden bit: `a_m = {1'b1, a_frac}` and `b_m = {1'b1, b_frac}`.
+- This 24-bit significand is what must be passed to the Stage 4 multiplier.
 
 > If you restrict inputs to **normal numbers only**, then:
 > - `expA` and `expB` are always 1..254,
 > - hidden-one insertion always happens,
 > - special logic is bypassed in practice.
-
+   
 ### Stage 3 — Input normalization (lightweight)
 - If mantissa MSB is not set, shift left and decrement exponent.
 - This is mainly relevant for denormal handling; for strictly normal inputs, this typically does nothing.
-
+     
 ### Stage 4 — Multiply core
 - Compute result sign: `z_s = a_s ^ b_s`
 - Exponent add: `z_e = a_e + b_e + 1`
 - Mantissa product: `product = a_m * b_m * 4`
+- **CRITICAL:** The intermediate `product` register must be **at least 50 bits wide**. Multiplying two 24-bit numbers creates a 48-bit result, and the `* 4` scaling requires 2 extr$
   - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
+
 
 ### Stage 5 — Extract mantissa + rounding bits
 - `z_m = product[49:26]`
