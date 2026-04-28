@@ -1,142 +1,116 @@
-# fmultiplier — FP32 Multiplier (Handshake, Multi-Cycle, IEEE-754)
+# FP32 Multiplier Spec (Agent-Oriented)
 
-## Overview
-`fmultiplier` is a **multi-cycle** single-precision floating-point multiplier that accepts one operation at a time using a **valid/out_valid** handshake. Internally it runs a staged pipeline controlled by a small FSM (`counter`) and produces a 32-bit IEEE-754 binary32 result.
+## Goal
+Implement `sources/multiply_fp32.sv` module `fmultiplier` as a synthesizable multi-cycle FP32 multiplier.
 
-This design currently targets:
-- **Bit-accurate results for normal FP32 numbers** (typical IEEE-754 behavior with round-to-nearest-even),
-- Deterministic latency (fixed number of cycles from `valid` to `out_valid`),
-- The design behaves as: z = a*b 
-- z, a and b are single precision 32-bit IEEE-754 numbers
+This task is graded by cocotb + Icarus. Prioritize deterministic behavior and bit-accurate finite multiplication with round-to-nearest-even (RNE).
 
----
+## What matters most for pass rate
+1. Correct `valid` / `out_valid` timing.
+2. Correct normal finite multiply path (including RNE).
+3. Correct overflow to infinity and obvious special cases.
+4. Never emit accidental nonzero on severe underflow.
 
-## Interface
+If you must simplify, keep finite normal-path math correct first.
 
-### Ports
-| Port | Dir | Width | Description |
-|------|-----|-------|-------------|
-| `clk`   | in | 1 | Clock |
-| `rst`   | in | 1 | Async reset (posedge) |
-| `valid` | in | 1 | **1-cycle start pulse**; accepted only when not busy |
-| `a`     |  in | 32 | Operand A (FP32 bits) |
-| `b`     | in | 32 | Operand B (FP32 bits) |
-| `z`         | out | 32 | Result (FP32 bits) |
-| `out_valid` | out | 1 | **1-cycle pulse** when `z` is updated/valid |
+## Interface + timing contract
+- Inputs: `clk`, `rst`, `valid`, `a[31:0]`, `b[31:0]`
+- Outputs: `z[31:0]`, `out_valid`
 
-### Handshake contract
-- When `busy==0`, a high `valid` on a rising edge **starts** an operation:
-  - `a` and `b` are **registered** into internal regs `a_r` and `b_r`.
-  - The FSM begins at `counter = 1`.
-- While `busy==1`, new `valid` pulses are **ignored**.
-- When the operation completes:
-  - `z` is updated,
-  - `out_valid` pulses high for 1 clock cycle,
-  - `busy` is cleared.
+Rules:
+- Accept only when idle and `valid==1`.
+- Latch operands on acceptance.
+- Ignore new `valid` while busy.
+- Output exactly one-cycle `out_valid` pulse when result is ready.
+- Keep fixed deterministic latency.
 
----
+## Required numeric behavior
+For `x`:
+- `sign = x[31]`
+- `exp  = x[30:23]`
+- `frac = x[22:0]`
 
-## Latency and Throughput
+Classes:
+- NaN: `exp==8'hFF && frac!=0`
+- Inf: `exp==8'hFF && frac==0`
+- Zero: `exp==0 && frac==0`
+- Normal: `1 <= exp <= 254`
+- Subnormal: `exp==0 && frac!=0`
 
-### Latency
-- Fixed latency of **7 stages**.
-- In this implementation the operation begins at stage `counter=1` and completes at `counter=7`.
-- `out_valid` asserts on the cycle where stage 7 packing finishes.
+Benchmark simplification policy:
+- For this benchmark, you may treat subnormal **inputs** as zero-equivalent in the special-case path.
+- This is preferred over partially-correct subnormal arithmetic.
 
-A safe expectation for system-level timing is:
-- **`out_valid` occurs 7 clock cycles after the start edge** (the clock edge where `valid` was sampled when idle).
+Special-case priority:
+1. NaN present -> quiet NaN (`32'h7FC00000` is fine).
+2. `Inf * 0` -> quiet NaN.
+3. Inf present -> signed Inf.
+4. Zero present -> signed Zero.
+5. Otherwise finite multiply.
 
-### Throughput
-- **Not pipelined** (single-issue).
-- Max throughput is **1 result per 7 cycles** (assuming `valid` is asserted only when idle).
+## Finite multiply algorithm (use integer datapath)
+Use this exact structure to avoid rounding bugs:
 
----
+1. Sign:
+   - `sign_z = sign_a ^ sign_b`
 
-## Internal Data Model (IEEE-754 binary32)
-For each operand:
-- `sign` = bit 31
-- `exp`  = bits 30:23 (biased exponent)
-- `mant` = bits 22:0 (fraction)
+2. 24-bit significands:
+   - Normal operand: `{1'b1, frac}`
+   - If implementing full subnormals: subnormal operand `{1'b0, frac}`
+   - If using simplification policy: route subnormal inputs through zero/special handling instead.
 
-Internal signals:
-- `a_s, b_s, z_s`: sign bits
-- `a_e, b_e, z_e`: signed exponent in *unbiased* domain (stored as 10-bit regs, used with `$signed`)
-- `a_m, b_m, z_m`: mantissas extended to 24-bit with hidden 1 when applicable
-- `product`: 50-bit product of mantissas
-- `guard_bit`, `round_bit`, `sticky`: rounding support bits for RNE
+3. Unbiased exponent sum (normal-path):
+   - Normal operand exponent contribution: `exp - 127`
+   - `exp_sum = exp_a_unbiased + exp_b_unbiased`
 
----
+4. Multiply significands:
+   - `prod = sig_a * sig_b` (48-bit)
 
-## FSM / Pipeline Stages
+5. Pre-normalize by top bit:
+   - If `prod[47]==1`, value is in `[2,4)`:
+     - increment exponent by 1
+     - take 24-bit candidate mantissa from `prod[47:24]` (includes hidden 1)
+     - `guard=prod[23]`, `round=prod[22]`, `sticky=|prod[21:0]`
+   - Else value is in `[1,2)`:
+     - mantissa candidate from `prod[46:23]`
+     - `guard=prod[22]`, `round=prod[21]`, `sticky=|prod[20:0]`
 
-The FSM is controlled by:
-- `busy` (operation in progress)
-- `counter` (stage number 1..7)
+6. RNE increment condition:
+   - `inc = guard && (round || sticky || mantissa_candidate[0])`
+   - `mantissa_rounded = mantissa_candidate + inc`
 
-All stage actions are performed inside a single sequential always block using `case(counter)`.
+7. Post-round renormalization:
+   - If `mantissa_rounded` overflows 24 bits, right-shift by 1 and increment exponent.
 
-### Stage 1 — Unpack
-- Extract mantissas into 24-bit regs (initially `{1'b0, frac}`).
-- Convert biased exponent into unbiased form: `exp - 127`.
-- Capture signs.
+8. Re-bias and pack:
+   - `exp_biased = exp_unbiased_final + 127`
+   - Overflow (`exp_biased >= 255`) -> signed Inf.
+   - Underflow (`exp_biased <= 0`) -> **signed Zero**.
+   - Do not emit subnormal outputs for this task unless you are sure they are correct.
+   - Normal pack: `{sign_z, exp_biased[7:0], mantissa_rounded[22:0]}`
 
-### Stage 2 — Special classification + denormal setup
-- Checks operand classes using `a_is_nan`, `a_is_inf`, `a_is_zero`, etc. (derived from `a_r/b_r` fields).
-- For normal operation:
-  - If exponent is nonzero => sets implicit leading 1: `a_m[23] = 1`.
-  - If exponent is zero (subnormal) => forces exponent to -126 (subnormal exponent baseline).
+### Critical anti-bug checks
+- If your output exponent field is `8'h00`, output fraction must be `23'd0` (signed zero only).
+- Common failure pattern: expected `0x00000000` but design returns tiny nonzero; guard against this explicitly in pack stage.
+- Common failure pattern: 1-ULP mismatch from stale/non-updated temporaries. In a clocked stage, compute with local temporaries using blocking assignments, then write final regs with nonblocking assignments.
 
-> If you restrict inputs to **normal numbers only**, then:
-> - `expA` and `expB` are always 1..254,
-> - hidden-one insertion always happens,
-> - special logic is bypassed in practice.
+## Practical implementation notes
+- Keep internal exponent as signed (`integer` or signed vector wide enough for intermediate values).
+- Keep all combinational math explicit; avoid real-number operations.
+- A small FSM (5-7 stages) is fine; one result at a time is acceptable.
 
-### Stage 3 — Input normalization (lightweight)
-- If mantissa MSB is not set, shift left and decrement exponent.
-- This is mainly relevant for denormal handling; for strictly normal inputs, this typically does nothing.
+## Required self-check before final answer
+Run at least these directed checks before finalizing:
+- normal x normal random sweep
+- max finite x 2.0
+- min normal x 0.5
+- NaN propagation
+- Inf x 0
+- very small normal x very small normal (expect zero in this task policy)
+- one tie-to-even style case to confirm RNE LSB behavior
 
-### Stage 4 — Multiply core
-- Compute result sign: `z_s = a_s ^ b_s`
-- Exponent add: `z_e = a_e + b_e + 1`
-- Mantissa product: `product = a_m * b_m * 4`
-  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
+If any fail, fix RTL before final answer.
 
-### Stage 5 — Extract mantissa + rounding bits
-- `z_m = product[49:26]`
-- `guard_bit = product[25]`
-- `round_bit = product[24]`
-- `sticky = OR(product[23:0])`
-
-### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
-This stage performs:
-1. **Underflow alignment** toward exponent -126:
-   - Computes shift amount `sh = (-126 - z_e)` when `z_e < -126`.
-   - Shifts mantissa right and accumulates shifted-out bits into sticky.
-2. **Normalize** if MSB missing:
-   - Left-shifts mantissa while adjusting exponent, carrying guard into LSB.
-3. **RNE rounding**:
-   - If `G == 1` and `(R || S || LSB)` then increment mantissa.
-   - Handles carry-out from rounding:
-     - If rounding overflows mantissa, set mantissa to 0x800000 and increment exponent.
-
-### Stage 7 — Pack
-- For normal path:
-  - Pack sign, biased exponent, fraction.
-  - If exponent indicates overflow -> output INF.
-  - If exponent indicates exact denorm boundary -> force exponent field to 0 (denormal/zero representation).
-- Asserts `out_valid` for one cycle and clears `busy`.
-
----
-
-## Assumptions & Constraints
-- Inputs: `exp ∈ [1..254]` (no zeros/subnormals, no inf/nan)
-
----
-
-## Verification Notes
-Recommended testbench behavior for this handshake design:
-- Drive `a/b` and pulse `valid` **synchronously** on clock edges.
-- Wait for `out_valid` before sampling `z`.
-- Generate only normal operands,
-
----
+## Constraints
+- Synthesizable SystemVerilog only.
+- No SVA property/sequence syntax (Icarus compatibility).

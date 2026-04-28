@@ -1,6 +1,33 @@
-Complete the given partial Systemverilog RTL code based on the specification doc/spec.md. The RTL code should be synthesizable.
-Make sure that the name of the files match with the following:
-- Top:        multiply_fp32.sv
+Complete the partial SystemVerilog RTL in `sources/multiply_fp32.sv` using `doc/spec.md`. The RTL must be synthesizable.
 
+File/module target:
+- Top file: `multiply_fp32.sv`
+- Top module: `fmultiplier`
 
-**Important**: This environment uses Icarus Verilog for testing. Avoid using SystemVerilog Assertion (SVA) property/sequence syntax if adding assertions.$
+## Pre-finalization self-check (required)
+Before finalizing, write a small SystemVerilog testbench or Python cocotb test to check at least:
+- NaN x anything
+- Inf x 0
+- +/-0 x normal
+- max finite x 2.0
+- min normal x 0.5
+- subnormal x normal
+
+If any of these tests fail, fix the design before returning your final answer.
+
+## Writing style constraints
+- Keep implementation guidance concise and execution-oriented.
+- Avoid long theoretical digressions unless directly needed to implement RTL.
+- Keep definitions consistent and close to where they are used.
+
+Important: this environment uses Icarus Verilog for testing. Avoid SVA property/sequence syntax.
+
+Implementation priority:
+1) deterministic handshake/timing correctness
+2) finite normal-path FP32 multiply correctness with integer RNE logic
+3) special-case handling (NaN/Inf/zero) without breaking (1) and (2)
+
+Important scoring hint:
+- Avoid underflow noise: if the final biased exponent is <= 0, output signed zero (exp=0, frac=0).
+- Do not return subnormal outputs unless you are highly confident the subnormal path is exact.
+- It is acceptable (and often safer) to treat subnormal inputs as zero-equivalent for this benchmark.
