@@ -3,4 +3,5 @@ __pycache__/
 tests/sim_build/
 *.vvp
 *.xml
-.pytest_cache/
+.pytest_cache/.DS_Store
+sources/Untitled
