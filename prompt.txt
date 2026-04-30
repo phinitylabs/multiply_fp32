@@ -1,24 +1,6 @@
-### Critical Correctness Requirements (Must Follow)
+Complete the given partial Systemverilog RTL code based on the specification doc/spec.md. The RTL code should be synthesizable.
+Make sure that the name of the files match with the following:
+- Top:        multiply_fp32.sv
 
-- If exponent after normalization exceeds maximum:
-  → output INF (exp = 255, mantissa = 0)
-  → do NOT clamp to zero
 
-- If exponent becomes negative after normalization:
-  → output zero
-  → do NOT attempt partial/denormal handling
-
-- Normalization must happen BEFORE rounding
-
-- Rounding must NOT be applied on unnormalized mantissa
-
-- Perform normalization exactly once:
-  → do NOT normalize again after rounding unless mantissa overflow occurs
-
-- After rounding:
-  if mantissa overflows:
-    → shift right by 1
-    → increment exponent
-
-- Do NOT mix multiple scaling methods:
-  → avoid using both "*4" and exponent "+1"
+**Important**: This environment uses Icarus Verilog for testing. Avoid using SystemVerilog Assertion (SVA) property/sequence syntax if adding assertions.$
