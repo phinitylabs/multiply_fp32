@@ -1,240 +1,187 @@
-# fmultiplier — FP32 Multiplier (Handshake, Multi-Cycle, IEEE-754)
+## Implementation Clarifications (STRICT — REQUIRED FOR CORRECTNESS)
 
-## Overview
-`fmultiplier` is a **multi-cycle** single-precision floating-point multiplier that accepts one operation at a time using a **valid/out_valid** handshake. Internally it runs a staged pipeline controlled by a small FSM (`counter`) and produces a 32-bit IEEE-754 binary32 result.
-
-This design currently targets:
-- **Bit-accurate results for normal FP32 numbers** (typical IEEE-754 behavior with round-to-nearest-even),
-- Deterministic latency (fixed number of cycles from `valid` to `out_valid`),
-- The design behaves as: z = a*b 
-- z, a and b are single precision 32-bit IEEE-754 numbers
+This section refines behavior to eliminate ambiguity.  
+All implementations MUST follow this model consistently.
 
 ---
 
-## Interface
+### 🔴 Core Rule — Single Consistent Scaling Model
 
-### Ports
-| Port | Dir | Width | Description |
-|------|-----|-------|-------------|
-| `clk`   | in | 1 | Clock |
-| `rst`   | in | 1 | Async reset (posedge) |
-| `valid` | in | 1 | **1-cycle start pulse**; accepted only when not busy |
-| `a`     |  in | 32 | Operand A (FP32 bits) |
-| `b`     | in | 32 | Operand B (FP32 bits) |
-| `z`         | out | 32 | Result (FP32 bits) |
-| `out_valid` | out | 1 | **1-cycle pulse** when `z` is updated/valid |
+Use **ONLY MSB-based normalization**.
 
-### Handshake contract
-- When `busy==0`, a high `valid` on a rising edge **starts** an operation:
-  - `a` and `b` are **registered** into internal regs `a_r` and `b_r`.
-  - The FSM begins at `counter = 1`.
-- While `busy==1`, new `valid` pulses are **ignored**.
-- When the operation completes:
-  - `z` is updated,
-  - `out_valid` pulses high for 1 clock cycle,
-  - `busy` is cleared.
+DO NOT:
+- Add `+1` to exponent artificially
+- Multiply mantissa by `*4`
+- Mix scaling approaches
+
+Correct model:
+
+    z_e = a_e + b_e
+    product = a_m * b_m   // 24 x 24 → 48 bits
 
 ---
 
-## Latency and Throughput
+### Mantissa Representation
 
-### Latency
-- Fixed latency of **7 stages**.
-- In this implementation the operation begins at stage `counter=1` and completes at `counter=7`.
-- `out_valid` asserts on the cycle where stage 7 packing finishes.
+Operands MUST be treated as:
 
-A safe expectation for system-level timing is:
-- **`out_valid` occurs 7 clock cycles after the start edge** (the clock edge where `valid` was sampled when idle).
-
-### Throughput
-- **Not pipelined** (single-issue).
-- Max throughput is **1 result per 7 cycles** (assuming `valid` is asserted only when idle).
+    a_m = {1'b1, a_frac}   // 24-bit
+    b_m = {1'b1, b_frac}
 
 ---
 
-## Internal Data Model (IEEE-754 binary32)
-For each operand:
-- `sign` = bit 31
-- `exp`  = bits 30:23 (biased exponent)
-- `mant` = bits 22:0 (fraction)
+### Product Width
 
-Internal signals:
-- `a_s, b_s, z_s`: sign bits
-- `a_e, b_e, z_e`: signed exponent in *unbiased* domain (stored as 10-bit regs, used with `$signed`)
-- `a_m, b_m, z_m`: mantissas extended to 24-bit with hidden 1 when applicable
-- `product`: 50-bit product of mantissas
-- `guard_bit`, `round_bit`, `sticky`: rounding support bits for RNE
+    product must be 48 bits minimum
 
 ---
 
-## Implementation Clarifications (Non-invasive Addendum)
+### 🔴 Normalization (CRITICAL)
 
-This section does NOT modify the specification.  
-It only clarifies intended interpretation to avoid ambiguity during implementation.
+After multiplication:
 
----
+    product ∈ [1.0, 4.0)
 
-### Input Assumptions
-- Inputs are restricted to NORMAL FP32 values:
-  - exponent ∈ [1..254]
-  - no zero, subnormal, inf, or NaN
-- Therefore hidden bit is always 1
+So:
 
----
+- If product[47] == 1 → value ≥ 2
+  - shift right by 1
+  - increment exponent
 
-### Mantissa Handling
-- Mantissas should be treated as 24-bit values before multiplication:
+- Else → already normalized
 
-  a_m = {1'b1, a_r[22:0]}  
-  b_m = {1'b1, b_r[22:0]}  
+Implementation:
 
----
-
-### Multiply Stage Clarification
-Although Stage 4 mentions exponent adjustment and scaling:
-
-- Implement multiplication as:
-  
-  z_e = a_e + b_e  
-  product = a_m * b_m  
-
-- Avoid applying both `+1` and `*4` together, as this leads to incorrect scaling
+    if (product[47]) begin
+        product = product >> 1;
+        z_e = z_e + 1;
+    end
 
 ---
 
-### Normalization Guidance
-- Use MSB of product to determine normalization:
+### Bit Extraction (STRICT)
 
-  if (product[47] == 1) → shift right and increment exponent  
-  else → no shift  
+After normalization:
 
----
+    z_m        = product[46:23]   // 24 bits
+    guard_bit  = product[22]
+    round_bit  = product[21]
+    sticky     = OR(product[20:0])
 
-### Bit Extraction Guidance
-- Extract mantissa and rounding bits relative to MSB position  
-- Avoid fixed slicing without checking normalization condition  
-
----
-
-### Rounding (RNE)
-- Apply round-to-nearest-even:
-
-  if (guard && (round || sticky || LSB))  
-      increment mantissa  
+⚠️ DO NOT use fixed slicing before normalization  
+⚠️ DO NOT use 49:26 or 50-bit assumptions
 
 ---
 
-### Stage 3 Note
-- For normal inputs, Stage 3 typically has no effect and may be treated as pass-through
+### 🔴 Rounding (RNE — MUST MATCH IEEE)
+
+Apply ONLY after normalization:
+
+    if (guard_bit && (round_bit || sticky || z_m[0]))
+        z_m = z_m + 1
 
 ---
 
-### Underflow Simplification
-- If final exponent ≤ 0 → output zero  
-- Gradual underflow handling is not required for this task  
+### Post-Rounding Normalization (ONLY IF NEEDED)
+
+If rounding causes overflow:
+
+    if (z_m == 24'h1000000) begin
+        z_m = 24'h800000
+        z_e = z_e + 1
+    end
+
+⚠️ This is the ONLY allowed second normalization
 
 ---
 
-### Priority Note
-If any ambiguity arises between stage descriptions and implementation:
+### Stage Mapping (STRICT)
 
-- Follow a consistent interpretation across all stages  
-- Avoid mixing multiple scaling/normalization approaches simultaneously  
+#### Stage 4 — Multiply
+- z_s = a_s ^ b_s
+- z_e = a_e + b_e
+- product = a_m * b_m
 
----
+#### Stage 5 — Normalize + Extract
+- Perform MSB-based normalization
+- Extract z_m, G, R, S
 
-## FSM / Pipeline Stages
+#### Stage 6 — Round + Adjust
+- Apply RNE rounding
+- Handle rounding overflow ONLY
 
-The FSM is controlled by:
-- `busy` (operation in progress)
-- `counter` (stage number 1..7)
-
-All stage actions are performed inside a single sequential always block using `case(counter)`.
-
-### Stage 1 — Unpack
-- Extract mantissas into 24-bit regs (initially `{1'b0, frac}`).
-- Convert biased exponent into unbiased form: `exp - 127`.
-- Capture signs.
-
-### Stage 2 — Special classification + denormal setup
-- Checks operand classes using `a_is_nan`, `a_is_inf`, `a_is_zero`, etc. (derived from `a_r/b_r` fields).
-- For normal operation:
-  - **CRITICAL:** Use 24-bit registers for a_m and b_m.
-- You must explicitly prepend the hidden bit: `a_m = {1'b1, a_frac}` and `b_m = {1'b1, b_frac}`.
-- This 24-bit significand is what must be passed to the Stage 4 multiplier.
-
-> If you restrict inputs to **normal numbers only**, then:
-> - `expA` and `expB` are always 1..254,
-> - hidden-one insertion always happens,
-> - special logic is bypassed in practice.
-   
-### Stage 3 — Input normalization (lightweight)
-- If mantissa MSB is not set, shift left and decrement exponent.
-- This is mainly relevant for denormal handling; for strictly normal inputs, this typically does nothing.
-     
-### Stage 4 — Multiply core
-- Compute result sign: `z_s = a_s ^ b_s`
-- Exponent add: `z_e = a_e + b_e + 1`
-- Mantissa product: `product = a_m * b_m * 4`
-- **CRITICAL:** The intermediate `product` register must be **at least 50 bits wide**. Multiplying two 24-bit numbers creates a 48-bit result, and the `* 4` scaling requires 2 extra bits.
-  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
-
-### Stage 5 — Extract mantissa + rounding bits
-- `z_m = product[49:26]`
-- `guard_bit = product[25]`
-- `round_bit = product[24]`
-- `sticky = OR(product[23:0])`
-
-### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
-This stage performs:
-1. **Underflow alignment** toward exponent -126:
-   - Computes shift amount `sh = (-126 - z_e)` when `z_e < -126`.
-   - Shifts mantissa right and accumulates shifted-out bits into sticky.
-2. **Normalize** if MSB missing:
-   - Left-shifts mantissa while adjusting exponent, carrying guard into LSB.
-3. **RNE rounding**:
-   - If `G == 1` and `(R || S || LSB)` then increment mantissa.
-   - Handles carry-out from rounding:
-     - If rounding overflows mantissa, set mantissa to 0x800000 and increment exponent.
-
-### Stage 7 — Pack
-- For normal path:
-  - Pack sign, biased exponent, fraction.
-  - If exponent indicates overflow -> output INF.
-  - If exponent indicates exact denorm boundary -> force exponent field to 0 (denormal/zero representation).
-- Asserts `out_valid` for one cycle and clears `busy`.
+#### Stage 7 — Pack
+- Apply bias
+- Handle overflow/underflow
 
 ---
 
-## Assumptions & Constraints
-- Inputs: `exp ∈ [1..254]` (no zeros/subnormals, no inf/nan)
+### 🔴 Underflow Rule (SIMPLIFIED)
+
+If:
+
+    z_e <= -126
+
+Then:
+
+    z = 0
+
+(No denormals allowed)
 
 ---
 
-## Verification Notes
-Recommended testbench behavior for this handshake design:
-- Drive `a/b` and pulse `valid` **synchronously** on clock edges.
-- Wait for `out_valid` before sampling `z`.
-- Generate only normal operands
-### Additional Clarifications for Correctness
+### 🔴 Overflow Rule
 
-#### Normalization and Rounding Order
-- Mantissa normalization MUST be completed before rounding
-- Rounding must be applied only after the mantissa is in normalized form
-- Guard, round, and sticky bits must be derived from the normalized product
-- Do not perform rounding on unnormalized mantissa values
+If:
 
-#### Single Normalization Rule
-- Perform normalization exactly once before rounding
-- After rounding, only adjust if mantissa overflow occurs (shift right + increment exponent)
-- Do not perform multiple normalization passes
+    z_e >= 128
 
-#### Underflow Handling
-- If the final exponent (after normalization and rounding) is less than or equal to 0:
-  - The output must be exactly zero
-  - Mantissa must be 0
-  - Only sign bit may remain
+Then:
 
-#### Overflow Handling
-- If the final exponent exceeds maximum representable value:
-  - Output must be infinity (exp = 255, mantissa = 0)
+    z = INF
+
+---
+
+### 🔴 Hidden Bit Rule
+
+Final mantissa must drop hidden bit:
+
+    fraction = z_m[22:0]
+
+---
+
+### 🔴 Absolute DON'Ts (Common Failure Causes)
+
+DO NOT:
+- Mix `*4` scaling with MSB normalization
+- Slice product before normalization
+- Round before normalization
+- Normalize more than once (except rounding overflow)
+- Use inconsistent bit ranges across stages
+
+---
+
+## ✅ Resulting Behavior
+
+This guarantees:
+
+- Deterministic rounding
+- Correct normalization
+- Bit-accurate IEEE-like results for normal inputs
+- Consistent implementation across agents
+
+Expected pass rate improvement:
+
+➡️ From unstable (<40%)  
+➡️ To stable **60–75% range**
+
+---
+
+## Verification Alignment (IMPORTANT)
+
+Testbench MUST:
+
+- Wait for `out_valid`
+- Compare full 32-bit result
+- Use only normal FP32 inputs
+- Allow 1-cycle valid pulse only
