@@ -1,32 +1,24 @@
-### Implementation Hints (Follow Strictly)
+### Critical Correctness Requirements (Must Follow)
 
-- Assume inputs are always NORMAL (no zero, subnormal, inf, NaN)
+- If exponent after normalization exceeds maximum:
+  → output INF (exp = 255, mantissa = 0)
+  → do NOT clamp to zero
 
-- Always construct mantissas as:
-  a_m = {1'b1, a[22:0]}
-  b_m = {1'b1, b[22:0]}
+- If exponent becomes negative after normalization:
+  → output zero
+  → do NOT attempt partial/denormal handling
 
-- Perform mantissa multiplication as:
-  product = a_m * b_m
+- Normalization must happen BEFORE rounding
 
-- Compute exponent as:
-  z_e = a_e + b_e
+- Rounding must NOT be applied on unnormalized mantissa
 
-- Do NOT apply both exponent +1 and mantissa *4 together
+- Perform normalization exactly once:
+  → do NOT normalize again after rounding unless mantissa overflow occurs
 
-- Normalize using MSB of product:
-  if product[47] == 1 → shift right and increment exponent
-  else → no shift
+- After rounding:
+  if mantissa overflows:
+    → shift right by 1
+    → increment exponent
 
-- Extract mantissa and rounding bits relative to MSB (avoid fixed slicing without checking)
-
-- Apply round-to-nearest-even:
-  if (guard && (round || sticky || LSB)) → increment mantissa
-
-- If mantissa overflows after rounding:
-  shift right and increment exponent
-
-- If exponent overflows → return INF  
-- If exponent underflows → return 0  
-
-- Ignore denormal handling for this task
+- Do NOT mix multiple scaling methods:
+  → avoid using both "*4" and exponent "+1"
