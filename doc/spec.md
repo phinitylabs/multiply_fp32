@@ -216,3 +216,25 @@ Recommended testbench behavior for this handshake design:
 - Drive `a/b` and pulse `valid` **synchronously** on clock edges.
 - Wait for `out_valid` before sampling `z`.
 - Generate only normal operands
+### Additional Clarifications for Correctness
+
+#### Normalization and Rounding Order
+- Mantissa normalization MUST be completed before rounding
+- Rounding must be applied only after the mantissa is in normalized form
+- Guard, round, and sticky bits must be derived from the normalized product
+- Do not perform rounding on unnormalized mantissa values
+
+#### Single Normalization Rule
+- Perform normalization exactly once before rounding
+- After rounding, only adjust if mantissa overflow occurs (shift right + increment exponent)
+- Do not perform multiple normalization passes
+
+#### Underflow Handling
+- If the final exponent (after normalization and rounding) is less than or equal to 0:
+  - The output must be exactly zero
+  - Mantissa must be 0
+  - Only sign bit may remain
+
+#### Overflow Handling
+- If the final exponent exceeds maximum representable value:
+  - Output must be infinity (exp = 255, mantissa = 0)
