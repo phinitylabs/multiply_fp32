@@ -67,6 +67,82 @@ Internal signals:
 
 ---
 
+## Implementation Clarifications (Non-invasive Addendum)
+
+This section does NOT modify the specification.  
+It only clarifies intended interpretation to avoid ambiguity during implementation.
+
+---
+
+### Input Assumptions
+- Inputs are restricted to NORMAL FP32 values:
+  - exponent ∈ [1..254]
+  - no zero, subnormal, inf, or NaN
+- Therefore hidden bit is always 1
+
+---
+
+### Mantissa Handling
+- Mantissas should be treated as 24-bit values before multiplication:
+
+  a_m = {1'b1, a_r[22:0]}  
+  b_m = {1'b1, b_r[22:0]}  
+
+---
+
+### Multiply Stage Clarification
+Although Stage 4 mentions exponent adjustment and scaling:
+
+- Implement multiplication as:
+  
+  z_e = a_e + b_e  
+  product = a_m * b_m  
+
+- Avoid applying both `+1` and `*4` together, as this leads to incorrect scaling
+
+---
+
+### Normalization Guidance
+- Use MSB of product to determine normalization:
+
+  if (product[47] == 1) → shift right and increment exponent  
+  else → no shift  
+
+---
+
+### Bit Extraction Guidance
+- Extract mantissa and rounding bits relative to MSB position  
+- Avoid fixed slicing without checking normalization condition  
+
+---
+
+### Rounding (RNE)
+- Apply round-to-nearest-even:
+
+  if (guard && (round || sticky || LSB))  
+      increment mantissa  
+
+---
+
+### Stage 3 Note
+- For normal inputs, Stage 3 typically has no effect and may be treated as pass-through
+
+---
+
+### Underflow Simplification
+- If final exponent ≤ 0 → output zero  
+- Gradual underflow handling is not required for this task  
+
+---
+
+### Priority Note
+If any ambiguity arises between stage descriptions and implementation:
+
+- Follow a consistent interpretation across all stages  
+- Avoid mixing multiple scaling/normalization approaches simultaneously  
+
+---
+
 ## FSM / Pipeline Stages
 
 The FSM is controlled by:
@@ -100,9 +176,8 @@ All stage actions are performed inside a single sequential always block using `c
 - Compute result sign: `z_s = a_s ^ b_s`
 - Exponent add: `z_e = a_e + b_e + 1`
 - Mantissa product: `product = a_m * b_m * 4`
-- **CRITICAL:** The intermediate `product` register must be **at least 50 bits wide**. Multiplying two 24-bit numbers creates a 48-bit result, and the `* 4` scaling requires 2 extr$
+- **CRITICAL:** The intermediate `product` register must be **at least 50 bits wide**. Multiplying two 24-bit numbers creates a 48-bit result, and the `* 4` scaling requires 2 extra bits.
   - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
-
 
 ### Stage 5 — Extract mantissa + rounding bits
 - `z_m = product[49:26]`
@@ -140,6 +215,4 @@ This stage performs:
 Recommended testbench behavior for this handshake design:
 - Drive `a/b` and pulse `valid` **synchronously** on clock edges.
 - Wait for `out_valid` before sampling `z`.
-- Generate only normal operands,
-
----
+- Generate only normal operands

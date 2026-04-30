@@ -1,6 +1,32 @@
-Complete the given partial Systemverilog RTL code based on the specification doc/spec.md. The RTL code should be synthesizable.
-Make sure that the name of the files match with the following:
-- Top:        multiply_fp32.sv
+### Implementation Hints (Follow Strictly)
 
+- Assume inputs are always NORMAL (no zero, subnormal, inf, NaN)
 
-**Important**: This environment uses Icarus Verilog for testing. Avoid using SystemVerilog Assertion (SVA) property/sequence syntax if adding assertions.$
+- Always construct mantissas as:
+  a_m = {1'b1, a[22:0]}
+  b_m = {1'b1, b[22:0]}
+
+- Perform mantissa multiplication as:
+  product = a_m * b_m
+
+- Compute exponent as:
+  z_e = a_e + b_e
+
+- Do NOT apply both exponent +1 and mantissa *4 together
+
+- Normalize using MSB of product:
+  if product[47] == 1 → shift right and increment exponent
+  else → no shift
+
+- Extract mantissa and rounding bits relative to MSB (avoid fixed slicing without checking)
+
+- Apply round-to-nearest-even:
+  if (guard && (round || sticky || LSB)) → increment mantissa
+
+- If mantissa overflows after rounding:
+  shift right and increment exponent
+
+- If exponent overflows → return INF  
+- If exponent underflows → return 0  
+
+- Ignore denormal handling for this task
