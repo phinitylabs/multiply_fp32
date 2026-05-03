@@ -1,170 +1,173 @@
-# fmultiplier — FP32 Multiplier (Handshake, Multi-Cycle, IEEE-754)
+# fmultiplier — FP32 Multiplier (Agent-Optimized Spec)
 
 ## Overview
-fmultiplier is a multi-cycle single-precision floating-point multiplier using a valid/out_valid handshake. It runs a staged pipeline (FSM via counter) and outputs a 32-bit IEEE-754 result.
+Implement a 32-bit floating-point multiplier:
 
-Target:
-- Bit-accurate for normal FP32 (round-to-nearest-even)
-- Deterministic latency
-- z = a * b
+    z = a * b
+
+Constraints:
+- IEEE-754 binary32
+- Round-to-nearest-even (RNE)
+- Fixed latency
+- Handshake-based (valid / out_valid)
+
+---
+
+## IMPORTANT SIMPLIFICATIONS (DO NOT VIOLATE)
+
+- Inputs are ALWAYS normal numbers
+- DO NOT handle NaN / Inf / zero / subnormal
+- Output underflow MUST flush to zero
+- Only one operation at a time (no pipelining)
 
 ---
 
 ## Interface
 
-Ports:
-clk        : in  (1)   Clock
-rst        : in  (1)   Async reset
-valid      : in  (1)   1-cycle start pulse
-a          : in  (32)  Operand A
-b          : in  (32)  Operand B
-z          : out (32)  Result
-out_valid  : out (1)   1-cycle result pulse
+| Port | Dir | Width | Description |
+|------|-----|-------|-------------|
+| clk   | in | 1 | Clock |
+| rst   | in | 1 | Async reset (posedge) |
+| valid | in | 1 | Start pulse (1 cycle) |
+| a     | in | 32 | Operand A |
+| b     | in | 32 | Operand B |
+| z     | out | 32 | Result |
+| out_valid | out | 1 | Result valid pulse (1 cycle) |
 
 ---
 
-## Handshake
-- valid accepted only when not busy
-- inputs latched on start
-- while busy, valid ignored
-- out_valid pulses for 1 cycle when result ready
+## Handshake Rules (STRICT)
+
+Start condition:
+    valid == 1 AND busy == 0
+
+On start (cycle T):
+    a_r <= a
+    b_r <= b
+    busy <= 1
+    counter <= 1
+
+While busy == 1:
+    ignore valid
+
+Completion (cycle T+6):
+    z updated
+    out_valid = 1 (exactly 1 cycle)
+    busy = 0
 
 ---
 
-## Latency
-- Fixed 7 cycles
+## Timing (EXACT)
+
+| Cycle | counter |
+|------|--------|
+| T    | 1 |
+| T+1  | 2 |
+| T+2  | 3 |
+| T+3  | 4 |
+| T+4  | 5 |
+| T+5  | 6 |
+| T+6  | 7 (out_valid = 1) |
+
+Latency = EXACTLY 7 cycles
 
 ---
 
-## Data Model
-- sign     = bit 31
-- exponent = bits 30:23
-- mantissa = bits 22:0
+## Data Format
 
-Internal:
-- mantissa extended to 24-bit with hidden 1
-- product = 48-bit
-- guard / round / sticky bits used
+For each operand:
+- sign = bit[31]
+- exponent = bits[30:23]
+- fraction = bits[22:0]
 
----
-
-## Implementation Clarifications
-
-### Input Assumptions
-- Only normal numbers
-- exponent in [1..254]
-- no zero, subnormal, inf, NaN
+Derived:
+- unbiased exponent = exp - 127
+- mantissa = {1'b1, fraction}  (24 bits)
 
 ---
 
-### Mantissa Handling
-a_m = {1'b1, a[22:0]}
-b_m = {1'b1, b[22:0]}
+## Computation (NO AMBIGUITY)
+
+### Step 1 — Sign
+    z_s = a_s ^ b_s
 
 ---
 
-### CANONICAL DATA PATH (MANDATORY)
+### Step 2 — Exponent
+    z_e = a_e + b_e
 
-product = a_m * b_m
+---
 
-if (product[47]) begin
-    product = product >> 1
+### Step 3 — Multiply
+
+    product = a_m * b_m   // 48-bit
+
+Range:
+    product ∈ [1.0, 4.0)
+
+---
+
+### Step 4 — Normalize + Extract (FIXED LOGIC)
+
+IF product[47] == 1:
+    // product >= 2
+    z_m = product[47:24]
     z_e = z_e + 1
-end
+    guard  = product[23]
+    round  = product[22]
+    sticky = OR(product[21:0])
 
-z_m    = product[46:23]
-guard  = product[22]
-round  = product[21]
-sticky = OR(product[20:0])
-
-if (guard && (round || sticky || z_m[0]))
-    z_m = z_m + 1
-
-if (z_m == 24'h1000000) begin
-    z_m = 24'h800000
-    z_e = z_e + 1
-end
+ELSE:
+    // product < 2
+    z_m = product[46:23]
+    guard  = product[22]
+    round  = product[21]
+    sticky = OR(product[20:0])
 
 ---
 
-### Stage Ownership Rules
-- Normalization only in Stage 5
-- Rounding only in Stage 6
+### Step 5 — Round to Nearest Even (RNE)
+
+Increment if:
+
+    guard == 1 AND (round == 1 OR sticky == 1 OR z_m[0] == 1)
+
+If increment causes overflow:
+    z_m >>= 1
+    z_e += 1
 
 ---
 
-### Underflow
-- If exponent <= -126 → output 0
+### Step 6 — Pack
+
+IF z_e > 127:
+    z = {z_s, 8'hFF, 23'b0}   // overflow → INF
+
+ELSE IF z_e < -126:
+    z = 32'b0                 // underflow → zero
+
+ELSE:
+    exp_out = z_e + 127
+    frac_out = z_m[22:0]
+    z = {z_s, exp_out, frac_out}
 
 ---
 
-### Overflow
-- If exponent >= 128 → output INF
+## Golden Rules
+
+1. out_valid MUST assert exactly at cycle T+6
+2. out_valid MUST be 1 cycle only
+3. z MUST be bit-exact IEEE result (RNE)
+4. Same input → same output always
 
 ---
 
-## FSM / Pipeline
+## Example Cases
 
-### Stage 1 — Unpack
-- Extract sign, exponent, mantissa
-- Convert exponent to unbiased
+1.0 * 1.0 = 1.0  
+2.0 * 0.5 = 1.0  
+1.5 * 1.5 = 2.25  
 
----
-
-### Stage 2 — Setup
-- Insert hidden bit
-- Prepare mantissas
-
----
-
-### Stage 3 — Pass-through
-- No change for normal inputs
-
----
-
-### Stage 4 — Multiply
-- z_s = a_s ^ b_s
-- z_e = a_e + b_e
-- product = a_m * b_m (48-bit)
-
----
-
-### Stage 5 — Normalize + Extract
-if (product[47]) begin
-    product = product >> 1
-    z_e = z_e + 1
-end
-
-z_m    = product[46:23]
-guard  = product[22]
-round  = product[21]
-sticky = OR(product[20:0])
-
----
-
-### Stage 6 — Round (RNE)
-if (guard && (round || sticky || z_m[0]))
-    z_m = z_m + 1
-
-if (z_m == 24'h1000000) begin
-    z_m = 24'h800000
-    z_e = z_e + 1
-end
-
----
-
-### Stage 7 — Pack
-- Apply bias (+127)
-- If exponent >= 255 → INF
-- If exponent <= 0 → 0
-- Drop hidden bit
-- Pack result
-- out_valid = 1
-
----
-
-## Verification Notes
-- valid is 1-cycle pulse
-- wait for out_valid
-- compare full 32-bit result
-- only normal inputs
+Hex:
+- 1.0  = 0x3F800000
+- 2.25 = 0x40100000
