@@ -21,7 +21,7 @@ Install the following if you don't already have them:
 - [Python 3.10+](https://www.python.org/downloads/)
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
 - [Icarus Verilog](https://steveicarus.github.io/iverilog/usage/installation.html) (`brew install icarus-verilog` on Mac, `apt install iverilog` on Linux)
-- HUD account (you should have received an invite — let us know if not)
+- HUD account (you should have received an invite — let us know if not). IMPORTANT: you must visit legacy.hud.ai to do your work, not hud.ai
 
 **Windows users:** You will need WSL. Follow the instructions in: [WSL Guide](https://docs.google.com/document/d/1LF0nSO5fTD7e_OC6GThE4AWRrnbPHl7Sz-8rnBxjEiM/edit?usp=sharing) (sections 3.1–3.5).
 
