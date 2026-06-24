@@ -252,12 +252,13 @@ This generates `local-claude-hud.json` with the correct problem entry. Now run:
 
 ```bash
 uv run hud eval local-claude-hud.json claude \
-  --model claude-sonnet-4-20250514 \
+  --model claude-haiku-4-5-20251001 \
   --max-steps 100 \
   --full --group-size 10
 ```
 
 This will give you a HUD link to view the results. Iterate until you achieve 40–70% pass rate.
+Note: Remember to go to the legacy HUD link. So instead of going to `https://hud.ai/trace/<trace-id>` got to `https://legacy.hud.ai/trace/<trace-id>` to view the results.
 
 ---
 
