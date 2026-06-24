@@ -257,8 +257,7 @@ uv run hud eval local-claude-hud.json claude \
   --full --group-size 10
 ```
 
-This will give you a HUD link to view the results. Iterate until you achieve 40–70% pass rate.
-Note: Remember to go to the legacy HUD link. So instead of going to `https://hud.ai/trace/<trace-id>` got to `https://legacy.hud.ai/trace/<trace-id>` to view the results.
+This will give you a HUD link to view the results. Iterate until you achieve 40–70% pass rate. Remember to go to the legacy HUD link. So instead of going to `https://hud.ai/trace/<trace-id>` got to `https://legacy.hud.ai/trace/<trace-id>` to view the results.
 
 ---
 
