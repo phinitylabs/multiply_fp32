@@ -6,7 +6,7 @@
 
 Your job in this takehome is to **analyze why an AI agent is failing a specific task, then modify the specification to make the problem easier, thereby improving its pass rate**.
 
-You are given a task where an AI agent (Claude Sonnet 4) achieves approximately **10% pass rate** across 20 independent attempts. Your goal is to modify the prompt/specification so that the agent achieves a pass rate **between 40% and 70%** (out of at least 10 runs).
+You are given a task where an AI agent (like Claude Sonnet or Haiku) achieves approximately **10% pass rate** across 20 independent attempts. Your goal is to modify the prompt/specification so that the agent achieves a pass rate **between 40% and 70%** (out of at least 10 runs).
 
 ---
 
@@ -21,7 +21,7 @@ Install the following if you don't already have them:
 - [Python 3.10+](https://www.python.org/downloads/)
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
 - [Icarus Verilog](https://steveicarus.github.io/iverilog/usage/installation.html) (`brew install icarus-verilog` on Mac, `apt install iverilog` on Linux)
-- HUD account (you should have received an invite — let us know if not). IMPORTANT: you must visit legacy.hud.ai to do your work, not hud.ai
+- HUD account (you should have received an invite — let us know if not). Traces and job results live at [hud.ai](https://hud.ai).
 
 **Windows users:** You will need WSL. Follow the instructions in: [WSL Guide](https://docs.google.com/document/d/1LF0nSO5fTD7e_OC6GThE4AWRrnbPHl7Sz-8rnBxjEiM/edit?usp=sharing) (sections 3.1–3.5).
 
@@ -160,6 +160,8 @@ Each time you make a change, you should test it by running on HUD (Section 5).
 
 ## Section 5: Running on HUD (~30 min)
 
+This framework uses **HUD v6**. Each problem runs in its own Docker image. The container serves a v6 control channel (`hud serve` on port 8765); the agent connects over SSH to edit files in the workspace. When the agent finishes, hidden tests grade the workspace via patch + pytest.
+
 ### One-time framework setup
 
 Clone the evaluation framework and install its dependencies:
@@ -170,7 +172,9 @@ cd verilog-coding-template
 uv sync
 ```
 
-Set your API keys. Your HUD API key can be found on [hud.ai](http://hud.ai) — click "Phinity Labs" in the top right, then go to the "API Keys" tab.
+Set your API keys. Your HUD API key can be created on [hud.ai](https://hud.ai) — go to your dashboard, then click "Phinity Labs" in the bottom left. Then click settings, this opens the project settings page, then go to the "API Keys" tab and create a new API key.
+
+> **Note:** If you previously created an API key from the legacy HUD platform, that key will **not** work. Create a new key by following the above steps.
 
 ```bash
 hud set HUD_API_KEY=<your HUD key>
@@ -198,10 +202,10 @@ This environment uses Icarus Verilog for testing. Avoid using SystemVerilog Asse
 
 The branch names (`base`, `test`, `golden`) must exactly match the branches in your fork. Since forking preserves all branches, these already exist.
 
-**Point the Dockerfile at your fork.** Open `Dockerfile` and find the `REPO_URL` line (near line 102):
+**Point the Dockerfile at your fork.** Open `Dockerfile` and find the `REPO_URL` line (near line 103):
 
 ```dockerfile
-ARG REPO_URL=https://github.com/aadinash/test-takehome.git
+ARG REPO_URL=https://github.com/hud-evals/example-verilog-codebase.git
 ```
 
 Change it to:
@@ -229,7 +233,7 @@ git cherry-pick <commit-hash-from-above>
 git push origin multiply_fp32_detailed_test
 ```
 
-**2. Rebuild the Docker image.** Back in the framework repo, first increment the cache-buster in the `Dockerfile` so Docker pulls fresh code from your fork (find the `ENV random=random6` line near the `REPO_URL` and change the number, e.g. `random7`, `random8`, etc.). Then build:
+**2. Rebuild the Docker image.** Back in the framework repo, first increment the cache-buster in the `Dockerfile` so Docker pulls fresh code from your fork (find the `ENV random=random6` line near `REPO_URL` and change the number, e.g. `random7`, `random8`, etc.). Then build:
 
 ```bash
 cd /path/to/verilog-coding-template
@@ -242,22 +246,24 @@ uv run utils/imagectl3.py verilog_ -b --ids multiply_fp32_detailed
 uv run utils/imagectl3.py verilog_ -v --ids multiply_fp32_detailed
 ```
 
-**4. Generate config and run** (to run 10 attempts):
+**4. Generate tasks and run** (10 independent attempts):
 
 ```bash
 uv run utils/imagectl3.py verilog_ -j --ids multiply_fp32_detailed
 ```
 
-This generates `local-claude-hud.json` with the correct problem entry. Now run:
+This writes `tasks.py` with one row per problem. Then run the local eval driver:
 
 ```bash
-uv run hud eval local-claude-hud.json claude \
-  --model claude-haiku-4-5-20251001 \
+uv run python run_eval.py --ids multiply_fp32_detailed --agent claude \
+  --model claude-sonnet-4-5 \
   --max-steps 100 \
-  --full --group-size 10
+  --group-size 10
 ```
 
-This will give you a HUD link to view the results. Iterate until you achieve 40–70% pass rate. Remember to go to the legacy HUD link. So instead of going to `https://hud.ai/trace/<trace-id>` got to `https://legacy.hud.ai/trace/<trace-id>` to view the results.
+`run_eval.py` starts a fresh Docker container per rollout, runs the agent, grades each attempt, and prints progress plus a job URL like `https://hud.ai/jobs/<job-id>`. Open that link to inspect individual rollouts.
+
+Iterate until you achieve 40–70% pass rate.
 
 ---
 
@@ -265,7 +271,7 @@ This will give you a HUD link to view the results. Iterate until you achieve 40�
 
 Once you have achieved a pass rate between 40% and 70%, email your liaison with:
 
-1. **Your modified `doc/spec.md`** (or a link to your branch)
+1. **Your modified `doc/spec.md`**
 
 2. **Your HUD results link** showing the pass rate
 
